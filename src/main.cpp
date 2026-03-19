@@ -8,6 +8,7 @@
 #include <glm/gtc/type_ptr.hpp>
 #include <cmath>
 #include <vector>
+#include <algorithm>
 #include "shader.h" // your wrapper for compiling shaders
 #include "ball.h"
 
