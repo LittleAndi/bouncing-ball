@@ -9,10 +9,12 @@
 #include <cmath>
 #include <vector>
 #include <algorithm>
+#include <random>
+#include <string>
 #include "shader.h" // your wrapper for compiling shaders
 #include "ball.h"
 
-int main()
+int main(int argc, char *argv[])
 {
     // Init GLFW
     if (!glfwInit())
@@ -43,10 +45,44 @@ int main()
     // Load shaders
     Shader ourShader("shaders/vertex.glsl", "shaders/fragment.glsl");
 
-    // Create ball
-    Ball ball;
-    ball.position = glm::vec3(0.0f, 0.5f, 0.0f);
-    ball.velocity = glm::vec3(2.0f, 1.5f, -1.0f); // m/s
+    // Parse ball count from CLI arg (default: 3)
+    int numBalls = 3;
+    if (argc > 1)
+        numBalls = std::clamp(std::stoi(argv[1]), 1, 50);
+
+    // Create balls with random positions, velocities, and distinct colors
+    auto hsvToRgb = [](float h, float s, float v) -> glm::vec3
+    {
+        float c = v * s;
+        float x = c * (1.0f - std::abs(std::fmod(h * 6.0f, 2.0f) - 1.0f));
+        float m = v - c;
+        glm::vec3 rgb;
+        int sector = static_cast<int>(h * 6.0f) % 6;
+        if (sector == 0)
+            rgb = {c, x, 0};
+        else if (sector == 1)
+            rgb = {x, c, 0};
+        else if (sector == 2)
+            rgb = {0, c, x};
+        else if (sector == 3)
+            rgb = {0, x, c};
+        else if (sector == 4)
+            rgb = {x, 0, c};
+        else
+            rgb = {c, 0, x};
+        return rgb + glm::vec3(m);
+    };
+
+    std::mt19937 rng(42);
+    std::uniform_real_distribution<float> posDist(-1.5f, 1.5f);
+    std::uniform_real_distribution<float> velDist(-3.0f, 3.0f);
+    std::vector<Ball> balls(numBalls);
+    for (int i = 0; i < numBalls; ++i)
+    {
+        balls[i].position = glm::vec3(posDist(rng), posDist(rng), posDist(rng));
+        balls[i].velocity = glm::vec3(velDist(rng), velDist(rng), velDist(rng));
+        balls[i].color = hsvToRgb(static_cast<float>(i) / numBalls, 0.85f, 0.95f);
+    }
 
     // Box bounds (cube from -2 to 2 in each axis)
     glm::vec3 boxMin = glm::vec3(-2.0f, -2.0f, -2.0f);
@@ -270,28 +306,46 @@ int main()
     glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (void *)(3 * sizeof(float)));
     glEnableVertexAttribArray(1);
 
-    // Generate bounce sound PCM data: 220 Hz damped sine wave (~250 ms thud)
+    // Generate PCM data for two sounds
     const int sampleRate = 44100;
     const float soundDuration = 0.25f;
     const int frameCount = static_cast<int>(sampleRate * soundDuration);
-    std::vector<float> pcmData(frameCount);
+
+    // Ball-ball collision: 220 Hz damped sine
+    std::vector<float> pcmBallBall(frameCount);
     for (int i = 0; i < frameCount; ++i)
     {
         float t = static_cast<float>(i) / sampleRate;
-        pcmData[i] = std::sin(2.0f * glm::pi<float>() * 220.0f * t) * std::exp(-20.0f * t);
+        pcmBallBall[i] = std::sin(2.0f * glm::pi<float>() * 220.0f * t) * std::exp(-20.0f * t);
+    }
+
+    // Wall collision: 110 Hz damped sine (lower pitch)
+    std::vector<float> pcmWall(frameCount);
+    for (int i = 0; i < frameCount; ++i)
+    {
+        float t = static_cast<float>(i) / sampleRate;
+        pcmWall[i] = std::sin(2.0f * glm::pi<float>() * 110.0f * t) * std::exp(-20.0f * t);
     }
 
     ma_engine audioEngine;
     ma_engine_init(NULL, &audioEngine);
 
-    ma_audio_buffer_config bufferConfig = ma_audio_buffer_config_init(
-        ma_format_f32, 1, static_cast<ma_uint64>(frameCount), pcmData.data(), NULL);
-    ma_audio_buffer audioBuffer;
-    ma_audio_buffer_init(&bufferConfig, &audioBuffer);
+    ma_audio_buffer_config ballBallConfig = ma_audio_buffer_config_init(
+        ma_format_f32, 1, static_cast<ma_uint64>(frameCount), pcmBallBall.data(), NULL);
+    ma_audio_buffer ballBallBuffer;
+    ma_audio_buffer_init(&ballBallConfig, &ballBallBuffer);
 
-    ma_sound bounceSound;
-    ma_sound_init_from_data_source(&audioEngine, &audioBuffer,
-                                   MA_SOUND_FLAG_NO_SPATIALIZATION, NULL, &bounceSound);
+    ma_audio_buffer_config wallConfig = ma_audio_buffer_config_init(
+        ma_format_f32, 1, static_cast<ma_uint64>(frameCount), pcmWall.data(), NULL);
+    ma_audio_buffer wallBuffer;
+    ma_audio_buffer_init(&wallConfig, &wallBuffer);
+
+    ma_sound ballBallSound;
+    ma_sound_init_from_data_source(&audioEngine, &ballBallBuffer,
+                                   MA_SOUND_FLAG_NO_SPATIALIZATION, NULL, &ballBallSound);
+    ma_sound wallSound;
+    ma_sound_init_from_data_source(&audioEngine, &wallBuffer,
+                                   MA_SOUND_FLAG_NO_SPATIALIZATION, NULL, &wallSound);
 
     // Render loop
     float deltaTime = 0.0f;
@@ -307,14 +361,30 @@ int main()
         if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
             glfwSetWindowShouldClose(window, true);
 
-        // Update ball physics
-        float impact = ball.update(deltaTime, boxMin, boxMax);
-        if (impact > 0.5f)
+        // Update ball physics (wall collisions)
+        float wallImpact = 0.0f;
+        for (auto &b : balls)
+            wallImpact = std::max(wallImpact, b.update(deltaTime, boxMin, boxMax));
+
+        // Resolve ball-ball collisions
+        float ballImpact = 0.0f;
+        for (int i = 0; i < static_cast<int>(balls.size()); ++i)
+            for (int j = i + 1; j < static_cast<int>(balls.size()); ++j)
+                ballImpact = std::max(ballImpact, resolveCollision(balls[i], balls[j]));
+
+        if (wallImpact > 0.5f)
         {
-            float volume = std::min(1.0f, std::max(0.05f, impact / 10.0f));
-            ma_sound_seek_to_pcm_frame(&bounceSound, 0);
-            ma_sound_set_volume(&bounceSound, volume);
-            ma_sound_start(&bounceSound);
+            float volume = std::min(1.0f, std::max(0.05f, wallImpact / 10.0f));
+            ma_sound_seek_to_pcm_frame(&wallSound, 0);
+            ma_sound_set_volume(&wallSound, volume);
+            ma_sound_start(&wallSound);
+        }
+        if (ballImpact > 0.5f)
+        {
+            float volume = std::min(1.0f, std::max(0.05f, ballImpact / 10.0f));
+            ma_sound_seek_to_pcm_frame(&ballBallSound, 0);
+            ma_sound_set_volume(&ballBallSound, volume);
+            ma_sound_start(&ballBallSound);
         }
 
         // Render
@@ -338,14 +408,17 @@ int main()
         glBindVertexArray(roomVAO);
         glDrawArrays(GL_TRIANGLES, 0, 24);
 
-        // Draw ball
-        ourShader.setVec3("objectColor", ball.color);
-        glm::mat4 model = glm::mat4(1.0f);
-        model = glm::translate(model, ball.position);
-        model = glm::scale(model, glm::vec3(ball.radius * 2.0f));
-        ourShader.setMat4("model", model);
-        glBindVertexArray(VAO);
-        glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
+        // Draw balls
+        for (const auto &b : balls)
+        {
+            ourShader.setVec3("objectColor", b.color);
+            glm::mat4 model = glm::mat4(1.0f);
+            model = glm::translate(model, b.position);
+            model = glm::scale(model, glm::vec3(b.radius * 2.0f));
+            ourShader.setMat4("model", model);
+            glBindVertexArray(VAO);
+            glDrawArrays(GL_TRIANGLES, 0, sphereVertexCount);
+        }
 
         glfwSwapBuffers(window);
         glfwPollEvents();
@@ -355,8 +428,10 @@ int main()
     glDeleteBuffers(1, &VBO);
     glDeleteVertexArrays(1, &roomVAO);
     glDeleteBuffers(1, &roomVBO);
-    ma_sound_uninit(&bounceSound);
-    ma_audio_buffer_uninit(&audioBuffer);
+    ma_sound_uninit(&ballBallSound);
+    ma_sound_uninit(&wallSound);
+    ma_audio_buffer_uninit(&ballBallBuffer);
+    ma_audio_buffer_uninit(&wallBuffer);
     ma_engine_uninit(&audioEngine);
     glfwTerminate();
     return 0;
