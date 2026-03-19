@@ -81,4 +81,36 @@ struct Ball
     }
 };
 
+// Resolves a collision between two balls. Returns the relative impact speed (0 if no collision).
+inline float resolveCollision(Ball &a, Ball &b)
+{
+    glm::vec3 delta = a.position - b.position;
+    float dist = glm::length(delta);
+    float minDist = a.radius + b.radius;
+    if (dist >= minDist || dist < 1e-6f)
+        return 0.0f;
+
+    // Collision normal (from b toward a)
+    glm::vec3 n = delta / dist;
+
+    // Positional correction: push balls apart weighted by mass
+    float overlap = minDist - dist;
+    float totalMass = a.mass + b.mass;
+    a.position += n * (overlap * b.mass / totalMass);
+    b.position -= n * (overlap * a.mass / totalMass);
+
+    // Relative velocity along the collision normal
+    float vRel = glm::dot(a.velocity - b.velocity, n);
+    if (vRel >= 0.0f) // Already separating
+        return 0.0f;
+
+    // Elastic collision impulse with restitution
+    static constexpr float RESTITUTION = 1.15f;
+    float impulse = -(1.0f + RESTITUTION) * vRel / (1.0f / a.mass + 1.0f / b.mass);
+    a.velocity += (impulse / a.mass) * n;
+    b.velocity -= (impulse / b.mass) * n;
+
+    return std::abs(vRel);
+}
+
 #endif
